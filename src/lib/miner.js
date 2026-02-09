@@ -19,6 +19,7 @@ export default class Miner extends EventEmitter {
         this.status = 'Idle'; // Idle, Connecting, Connected, Mining
         this.extraNonce1 = '';
         this.extraNonce2Size = 0;
+        this.workerHashrates = []; // Track per-worker hashrates for accurate total
     }
 
     setStatus(status) {
@@ -171,12 +172,14 @@ export default class Miner extends EventEmitter {
         this.connect();
         // Initialize workers
         console.log('[Miner] Starting with', this.threads, 'threads, algo:', this.algorithm);
+        this.workerHashrates = new Array(this.threads).fill(0); // Reset hashrates
         for (let i = 0; i < this.threads; i++) {
             console.log('[Miner] Creating worker', i);
             const worker = new Worker('/power2b.worker.js');
+            const workerIndex = i; // Capture index for closure
             worker.onmessage = (e) => {
-                console.log('[Miner] Worker message received:', e.data);
-                this.handleWorkerMessage(e);
+                console.log('[Miner] Worker', workerIndex, 'message received:', e.data);
+                this.handleWorkerMessage(e, workerIndex);
             };
             worker.onerror = (e) => {
                 console.error('[Miner] Worker error:', e.message, e);
@@ -192,22 +195,27 @@ export default class Miner extends EventEmitter {
         }
         this.workers.forEach(w => w.terminate());
         this.workers = [];
+        this.workerHashrates = []; // Reset hashrates
         this.connected = false;
     }
 
-    handleWorkerMessage(e) {
+    handleWorkerMessage(e, workerIndex = 0) {
         const data = e.data;
         if (data.type === 'hashrate') {
-            // Each worker reports its own hashrate - just apply 1000 multiplier for unit conversion
-            // Don't multiply by threads since each worker already reports individual rate
-            const scaledHashrate = data.value * 1000;
-            this.emit('hashrate', scaledHashrate);
+            // Store this worker's hashrate and emit total sum
+            // Note: Worker reports raw hashrate, no 1000x multiplier needed based on pool comparison
+            this.workerHashrates[workerIndex] = data.value || 0;
+            const totalHashrate = this.workerHashrates.reduce((sum, h) => sum + h, 0);
+            console.log('[Miner] Worker', workerIndex, 'hashrate:', data.value, '| Total:', totalHashrate);
+            this.emit('hashrate', totalHashrate);
         } else if (data.type === 'share' || data.type === 'submit') {
             this.submitShare(data.share || data.data);
             if (data.hashrate) {
-                // Each worker reports its own hashrate on share submission
-                const scaledHashrate = data.hashrate * 1000;
-                this.emit('hashrate', scaledHashrate);
+                // Store this worker's hashrate on share submission
+                this.workerHashrates[workerIndex] = data.hashrate || 0;
+                const totalHashrate = this.workerHashrates.reduce((sum, h) => sum + h, 0);
+                console.log('[Miner] Worker', workerIndex, 'share hashrate:', data.hashrate, '| Total:', totalHashrate);
+                this.emit('hashrate', totalHashrate);
             }
         } else if (data.type === 'log') {
             console.log('[Worker]', data.message);
